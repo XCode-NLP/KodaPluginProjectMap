@@ -1,0 +1,190 @@
+{
+  "id": "dev.koda.project-map",
+  "name": {
+    "ru": "Карта проекта",
+    "en": "Project map"
+  },
+  "version": "0.2.0",
+  "publisher": "Koda",
+  "description": {
+    "ru": "Модули и зависимости проекта. Передавайте модули агенту и смотрите область влияния задачи рядом с чатом.",
+    "en": "Project modules and dependencies. Reference modules in chat and inspect the predicted impact of a task."
+  },
+  "icon": "icon.svg",
+  "main": "bundle/main.js",
+  "ui": "ui/index.html",
+  "engines": {
+    "sdk": "1"
+  },
+  "permissions": ["project.read", "agent.run", "agent.tools", "chat.composer", "chat.context"],
+  "contributes": {
+    "workspaces": [
+      {
+        "id": "project-map",
+        "title": {
+          "ru": "Карта проекта",
+          "en": "Project map"
+        },
+        "icon": "network"
+      }
+    ],
+    "chatPanes": [
+      {
+        "id": "project-map-pane",
+        "title": {
+          "ru": "Карта проекта",
+          "en": "Project map"
+        },
+        "icon": "network"
+      }
+    ],
+    "mentions": {
+      "prefix": "module"
+    },
+    "agentTools": [
+      {
+        "name": "get_project_map",
+        "description": "Read the project map: its summary, the hierarchy of meaningful groups, modules and its version, dependencies and limitations for this chat. Use before forecasting changes. If no map exists, ask the user to open Project map and build it. Code edges are evidence; model edges are hypotheses.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "required": []
+        },
+        "readOnly": true
+      },
+      {
+        "name": "get_module",
+        "description": "Read a module, its relative file paths and dependencies. Paginated; use nextOffset to retrieve remaining files. Read source before drawing conclusions.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "moduleId": {
+              "type": "string"
+            },
+            "offset": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": ["moduleId"]
+        },
+        "readOnly": true
+      },
+      {
+        "name": "update_module_groups",
+        "description": "Replace semantic modules, naming and descriptions. Preserve stable IDs for unchanged modules. Supply EVERY indexed file exactly once across modules. Optional edges are model hypotheses with reasons; code dependencies are recomputed. Does not edit project files.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "string",
+              "description": "Version returned by get_project_map. Refresh stale maps in the UI first."
+            },
+            "modules": {
+              "type": "array",
+              "maxItems": 200,
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "files": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": ["id", "name", "description", "files"]
+              }
+            },
+            "edges": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "from": {
+                    "type": "string"
+                  },
+                  "to": {
+                    "type": "string"
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                },
+                "required": ["from", "to", "reason"]
+              }
+            }
+          },
+          "required": ["version", "modules"]
+        },
+        "readOnly": false
+      },
+      {
+        "name": "set_change_impact",
+        "description": "Publish a proposed change impact in this chat Project map. Categories: direct=expected code changes, indirect=dependent behavior, check=tests/contracts to verify. Every item must explain why and cite existing source files with line numbers. A forecast is not proof or authorization to edit.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "string",
+              "description": "Version returned by get_project_map. Refresh stale maps in the UI first."
+            },
+            "task": {
+              "type": "string"
+            },
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "moduleId": {
+                    "type": "string"
+                  },
+                  "category": {
+                    "enum": ["direct", "indirect", "check"]
+                  },
+                  "reason": {
+                    "type": "string"
+                  },
+                  "evidence": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "path": {
+                          "type": "string"
+                        },
+                        "line": {
+                          "type": "integer",
+                          "minimum": 1
+                        },
+                        "spec": {
+                          "type": "string",
+                          "description": "Code reference or import supporting the forecast"
+                        }
+                      },
+                      "required": ["path", "line", "spec"]
+                    }
+                  }
+                },
+                "required": ["moduleId", "category", "reason", "evidence"]
+              }
+            }
+          },
+          "required": ["version", "task", "items"]
+        },
+        "readOnly": false
+      }
+    ]
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "name": "koda-plugin-project-map",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "validate": "npm run build && koda-plugin validate .",
+    "pack": "npm run build && node scripts/pack.mjs",
+    "dev": "npm run build && koda-plugin dev .",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "test:integration": "npm run build && vitest run --config vitest.integration.config.mjs"
+  },
+  "devDependencies": {
+    "@babel/standalone": "7.29.10",
+    "@jitl/quickjs-wasmfile-release-sync": "0.32.0",
+    "@kodadev/desktop-plugin-sdk": "1.0.0",
+    "@types/babel__standalone": "7.1.9",
+    "@types/node": "25.9.5",
+    "quickjs-emscripten-core": "0.32.0",
+    "typescript": "7.0.2",
+    "vite": "8.3.8",
+    "vitest": "4.1.12"
+  }
+}

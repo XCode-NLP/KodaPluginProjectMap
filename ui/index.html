@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <link rel="stylesheet" href="style.css" />
+    <title>Project map</title>
+  </head>
+  <body>
+    <header>
+      <h1 id="title"></h1>
+      <select id="projects" aria-label="Project"></select
+      ><button id="expand" hidden></button><button id="rethink" hidden></button><button id="refresh"></button
+      ><button id="cancel" hidden></button>
+    </header>
+    <div class="toolbar">
+      <button id="up" class="icon-button">←</button>
+      <nav id="crumbs" aria-label="Path"></nav>
+      <input id="search" type="search" /><span id="stats"></span>
+      <div class="zoom">
+        <button id="zoomOut" aria-label="Zoom out">−</button><button id="fit"></button
+        ><button id="zoomIn" aria-label="Zoom in">+</button>
+      </div>
+    </div>
+    <p id="status" role="status" aria-live="polite"></p>
+    <p id="error" role="alert" hidden></p>
+    <p id="warning" role="status" hidden></p>
+    <main>
+      <section id="viewport" aria-label="Module map">
+        <div id="board">
+          <svg id="edges" aria-hidden="true"></svg>
+          <div id="nodes"></div>
+        </div>
+        <div id="empty">
+          <h2></h2>
+          <p></p>
+          <button id="build"></button>
+        </div>
+      </section>
+      <aside id="details"></aside>
+    </main>
+    <footer>
+      <div id="legend"></div>
+      <button id="insert" disabled></button>
+    </footer>
+    <details id="limitations">
+      <summary></summary>
+      <ul></ul>
+    </details>
+    <dialog id="source">
+      <header><strong></strong><button id="closeSource">×</button></header>
+      <pre tabindex="0"></pre>
+    </dialog>
+    <script src="app.js"></script>
+  </body>
+</html>
