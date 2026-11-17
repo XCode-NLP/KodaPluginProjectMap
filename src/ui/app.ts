@@ -1,21 +1,86 @@
 /* The UI has no Node or network access; all project data comes through the plugin. */
+import type {} from "@kodadev/desktop-plugin-sdk/ui";
+import type { Graph, Impact, SemanticGroup } from "../graph";
+
+/** Elements are looked up by id from index.html; one type covers the inputs, selects and dialogs used. */
+type Control = HTMLElement & HTMLInputElement & HTMLDialogElement;
+type Language = "ru" | "en";
+interface JobState {
+  id: string;
+  projectPath: string;
+  status: string;
+  done: number;
+  total: number;
+  error?: string;
+  warning?: string;
+  runId?: string;
+}
+interface Level {
+  key: string;
+  label?: string;
+}
+interface Group extends SemanticGroup {
+  children: string[];
+  own: string[];
+  files: string[];
+}
+interface Item {
+  key: string;
+  kind: "group" | "folder" | "file";
+  label: string;
+  path?: string;
+  files: string[];
+  group?: Group;
+  open: Level | null;
+}
+interface Stat {
+  out: number;
+  in: number;
+  extOut: number;
+  extIn: number;
+}
+interface MapEdge {
+  from: string;
+  to: string;
+  count: number;
+  model: boolean;
+  reasons?: string[];
+}
+interface Tree {
+  folders: Map<string, string[]>;
+  byPath: Map<string, Graph["files"][number]>;
+  moduleOf: Map<string, string>;
+  importers: Map<string, string[]>;
+  semantic: NonNullable<Graph["semantic"]> | null;
+  groups: Map<string, Group>;
+  groupOf: Map<string, string>;
+  version: string;
+}
+type Point = { x: number; y: number };
+
 (async () => {
-  const bridge = window.kodaPlugin;
-  if (!bridge) {
-    document.querySelector("#status").textContent = "Open this plugin inside Koda Desktop.";
+  const plugin = window.kodaPlugin;
+  if (!plugin) {
+    const status = document.querySelector("#status");
+    if (status) status.textContent = "Open this plugin inside Koda Desktop.";
     return;
   }
+  const bridge = plugin;
   const info = await bridge.info();
-  const $ = (id) => document.getElementById(id);
-  let language = info.language,
-    sessionId = info.sessionId,
-    projectPath = null,
-    graph = null,
-    impact = null,
-    job = null,
+  const $ = (id: string): Control => {
+    const element = document.getElementById(id);
+    if (!element) throw new Error(`Missing element #${id}`);
+    return element as Control;
+  };
+  let language: Language = info.language,
+    sessionId: string | null = info.sessionId,
+    projectPath: string | null = null,
+    graph: Graph | null = null,
+    impact: Impact | null = null,
+    job: JobState | null = null,
     stale = false,
     toolsAvailable = true;
-  let selected = new Set(),
+  let selected = new Set<string>(),
     agentLine = "",
     warning = "",
     scale = 1,
@@ -23,7 +88,7 @@
     epoch = 0,
     sourceEpoch = 0,
     reloadSequence = 0;
-  const strings = {
+  const strings: Record<Language, Record<string, string>> = {
     ru: {
       title: "Карта проекта",
       refresh: "Обновить",
@@ -191,11 +256,12 @@
       project: "Project",
     },
   };
-  const t = (key) => strings[language][key] || key;
+  const t = (key: string): string => strings[language][key] || key;
   const WORKSPACE = "project-map";
   const inPane = info.viewId !== WORKSPACE;
-  const quantity = (count, type) => {
-    const forms = {
+  type Quantity = "files" | "modules" | "folders" | "imports" | "parts";
+  const quantity = (count: number, type: Quantity) => {
+    const catalog: Record<Language, Record<Quantity, string[]>> = {
       ru: {
         files: ["файл", "файла", "файлов"],
         modules: ["модуль", "модуля", "модулей"],
@@ -210,11 +276,12 @@
         imports: ["import", "imports", "imports"],
         parts: ["part", "parts", "parts"],
       },
-    }[language][type];
+    };
+    const forms = catalog[language][type];
     const plural = new Intl.PluralRules(language).select(count);
     return `${new Intl.NumberFormat(language).format(count)} ${forms[plural === "one" ? 0 : plural === "few" ? 1 : 2]}`;
   };
-  const limitation = (text) => {
+  const limitation = (text: string) => {
     if (language !== "ru") return text;
     return text
       .replace(
@@ -236,60 +303,66 @@
       .replace("Missing tsconfig extends:", "Не найден tsconfig extends:")
       .replace("Cyclic tsconfig extends:", "Циклический tsconfig extends:");
   };
-  const el = (tag, text, className) => {
+  const el = <K extends keyof HTMLElementTagNameMap>(tag: K, text?: string, className?: string): HTMLElementTagNameMap[K] => {
     const node = document.createElement(tag);
     if (text !== undefined) node.textContent = text;
     if (className) node.className = className;
     return node;
   };
-  function error(e) {
+  function error(e: unknown) {
     $("error").hidden = false;
-    $("error").textContent = String(e?.message || e);
+    $("error").textContent = e instanceof Error ? e.message : String(e);
   }
-  async function call(method, params) {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  async function call<T = any>(method: string, params?: unknown): Promise<T> {
     try {
-      return await bridge.call(method, params);
+      return (await bridge.call(method, params)) as T;
     } catch (e) {
       error(e);
       throw e;
     }
   }
-  const validImpact = () => impact && graph && impact.version === graph.version && !stale;
-  const busyJob = () => job && ["listing", "indexing", "understanding"].includes(job.status);
+  const validImpact = (): boolean => !!impact && !!graph && impact.version === graph.version && !stale;
+  const busyJob = (): boolean => !!job && ["listing", "indexing", "understanding"].includes(job.status);
   const NODE_W = 232,
     NODE_H = 100,
     COL_GAP = 96,
     ROW_GAP = 20;
-  const RANK = { direct: 3, indirect: 2, check: 1 };
+  const RANK: Record<string, number> = { direct: 3, indirect: 2, check: 1 };
   const OTHER = "other";
-  const isTest = (p) => /(^|\/)(__tests__|tests?|spec)\/|\.(test|spec)\.[^/]+$|_test\.go$/.test(p);
-  const parentOf = (p) => (p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "");
-  const projectName = () => graph.projectPath.split(/[\\/]/).pop() || "/";
+  const isTest = (p: string) => /(^|\/)(__tests__|tests?|spec)\/|\.(test|spec)\.[^/]+$|_test\.go$/.test(p);
+  const parentOf = (p: string) => (p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "");
+  const projectName = () => graph!.projectPath.split(/[\\/]/).pop() || "/";
   // Derived once per graph version: folders, file owners, importers and the agent's group tree.
-  let tree = null;
-  function buildTree() {
-    const folders = new Map([["", []]]);
+  let tree: Tree = null as unknown as Tree; // built by render() before any reader runs
+  let treeVersion: string | null = null;
+  function buildTree(graph: Graph) {
+    const folders = new Map<string, string[]>([["", []]]);
     for (const f of graph.files)
       for (let d = parentOf(f.path); ; d = parentOf(d)) {
         if (!folders.has(d)) folders.set(d, []);
-        folders.get(d).push(f.path);
+        folders.get(d)!.push(f.path);
         if (!d) break;
       }
-    const moduleOf = new Map();
+    const moduleOf = new Map<string, string>();
     graph.modules.forEach((m) => m.files.forEach((f) => moduleOf.set(f, m.id)));
-    const importers = new Map();
+    const importers = new Map<string, string[]>();
     graph.files.forEach((f) =>
       (f.deps || []).forEach((d) => {
         if (!importers.has(d)) importers.set(d, []);
-        importers.get(d).push(f.path);
+        importers.get(d)!.push(f.path);
       }),
     );
     const semantic = graph.semantic?.groups?.length ? graph.semantic : null;
-    const groups = new Map((semantic?.groups || []).map((g) => [g.id, { ...g, children: [], own: [], files: [] }]));
+    const groups = new Map<string, Group>(
+      (semantic?.groups || []).map((g) => [g.id, { ...g, children: [], own: [], files: [] }]),
+    );
     if (semantic) {
-      groups.forEach((g) => g.parent && groups.get(g.parent)?.children.push(g.id));
+      groups.forEach((g) => {
+        if (g.parent) groups.get(g.parent)?.children.push(g.id);
+      });
       // Same rule as the plugin: the longest claimed path owns a file, unclaimed files go to `other`.
-      const claims = [];
+      const claims: [string, string][] = [];
       groups.forEach((g) => g.paths.forEach((p) => claims.push([p, g.id])));
       claims.sort((a, b) => b[0].length - a[0].length);
       for (const f of graph.files) {
@@ -306,11 +379,11 @@
             own: [],
             files: [],
           });
-        groups.get(owner).own.push(f.path);
-        for (let g = owner; g; g = groups.get(g)?.parent) groups.get(g)?.files.push(f.path);
+        groups.get(owner)!.own.push(f.path);
+        for (let g: string | null | undefined = owner; g; g = groups.get(g)?.parent) groups.get(g)?.files.push(f.path);
       }
     }
-    const groupOf = new Map();
+    const groupOf = new Map<string, string>();
     groups.forEach((g) => g.own.forEach((f) => groupOf.set(f, g.id)));
     tree = {
       folders,
@@ -322,20 +395,21 @@
       groupOf,
       version: graph.version,
     };
+    treeVersion = graph.version;
   }
-  const groupName = (g) => (g.id === OTHER ? t("otherGroup") : g.name);
+  const groupName = (g: Group) => (g.id === OTHER ? t("otherGroup") : g.name);
   // Navigation is a stack of levels, so a crumb can name a group even when the level below is a folder.
-  let stack = [{ key: "root" }];
+  let stack: Level[] = [{ key: "root" }];
   const levelKey = () => stack[stack.length - 1].key;
-  function folderItems(files, base, scope) {
+  function folderItems(files: string[], base: string, scope: string): Item[] {
     const prefix = base ? base + "/" : "";
-    const children = new Map();
+    const children = new Map<string, { dir: boolean; files: string[] }>();
     for (const f of files) {
       if (!f.startsWith(prefix)) continue;
       const rest = f.slice(prefix.length).split("/");
       const key = rest.length === 1 ? f : prefix + rest[0];
       if (!children.has(key)) children.set(key, { dir: rest.length > 1, files: [] });
-      children.get(key).files.push(f);
+      children.get(key)!.files.push(f);
     }
     return [...children.entries()].map(([path, c]) => {
       let shown = path;
@@ -348,7 +422,7 @@
       }
       return {
         key: shown,
-        kind: c.dir ? "folder" : "file",
+        kind: c.dir ? ("folder" as const) : ("file" as const),
         label: shown.slice(prefix.length),
         path: shown,
         files: c.files,
@@ -356,26 +430,26 @@
       };
     });
   }
-  const commonFolder = (files) => {
+  const commonFolder = (files: string[]) => {
     let common = parentOf(files[0] || "");
     for (const f of files) while (common && !f.startsWith(common + "/")) common = parentOf(common);
     return common;
   };
-  function groupItem(g) {
+  function groupItem(g: Group): Item {
     // A leaf opens straight into its own folders; a parent opens into its children.
     const open = g.children.length
       ? { key: `g:${g.id}`, label: groupName(g) }
       : { key: `d:${g.id}:${commonFolder(g.own)}`, label: groupName(g) };
     return {
       key: `g:${g.id}`,
-      kind: "group",
+      kind: "group" as const,
       label: groupName(g),
       group: g,
       files: g.files,
       open: g.files.length > 1 || g.children.length ? open : null,
     };
   }
-  function levelItems(key) {
+  function levelItems(key: string): Item[] {
     if (key === "root") {
       if (tree.semantic) return [...tree.groups.values()].filter((g) => !g.parent).map(groupItem);
       return folderItems(tree.folders.get("") || [], "", "");
@@ -383,11 +457,11 @@
     if (key.startsWith("g:")) {
       const g = tree.groups.get(key.slice(2));
       if (!g) return [];
-      const items = g.children.map((id) => groupItem(tree.groups.get(id)));
+      const items = g.children.map((id) => groupItem(tree.groups.get(id)!));
       if (g.own.length)
         items.push({
           key: `own:${g.id}`,
-          kind: "folder",
+          kind: "folder" as const,
           label: t("groupOwn"),
           files: g.own,
           open: { key: `d:${g.id}:${commonFolder(g.own)}`, label: t("groupOwn") },
@@ -399,18 +473,20 @@
     const files = scope ? tree.groups.get(scope)?.own || [] : tree.folders.get("") || [];
     return folderItems(files, base, scope);
   }
-  const forecastFor = (files) => {
-    if (!validImpact()) return null;
+  const forecastFor = (files: string[]) => {
+    if (!impact || !validImpact()) return null;
     const ids = new Set(files.map((f) => tree.moduleOf.get(f)));
     return impact.items.filter((i) => ids.has(i.moduleId)).sort((a, b) => RANK[b.category] - RANK[a.category])[0];
   };
-  const filesOf = (keys, items) => items.filter((c) => keys.has(c.key)).flatMap((c) => c.files);
-  const modulesFor = (files) => [...new Set(files.map((f) => tree.moduleOf.get(f)).filter(Boolean))];
-  function analyze(items) {
-    const owner = new Map();
+  const filesOf = (keys: Set<string>, items: Item[]) => items.filter((c) => keys.has(c.key)).flatMap((c) => c.files);
+  const modulesFor = (files: string[]) => [
+    ...new Set(files.map((f) => tree.moduleOf.get(f)).filter((id): id is string => !!id)),
+  ];
+  function analyze(graph: Graph, items: Item[]) {
+    const owner = new Map<string, string>();
     items.forEach((c) => c.files.forEach((f) => owner.set(f, c.key)));
-    const edges = new Map(),
-      stats = new Map(items.map((c) => [c.key, { out: 0, in: 0, extOut: 0, extIn: 0 }]));
+    const edges = new Map<string, MapEdge>(),
+      stats = new Map<string, Stat>(items.map((c) => [c.key, { out: 0, in: 0, extOut: 0, extIn: 0 }]));
     for (const f of graph.files) {
       const from = owner.get(f.path);
       for (const d of f.deps || []) {
@@ -420,13 +496,13 @@
           const edge = edges.get(k) || { from, to, count: 0, model: false };
           edge.count++;
           edges.set(k, edge);
-        } else if (from && !to) stats.get(from).extOut++;
-        else if (!from && to) stats.get(to).extIn++;
+        } else if (from && !to) stats.get(from)!.extOut++;
+        else if (!from && to) stats.get(to)!.extIn++;
       }
     }
     // Links the agent named (HTTP, events, configuration) between groups shown on this level.
     if (tree.semantic) {
-      const shownGroup = new Map();
+      const shownGroup = new Map<string, string>();
       items.forEach((c) => {
         if (c.group) for (const id of descendants(c.group.id)) shownGroup.set(id, c.key);
       });
@@ -442,46 +518,46 @@
       }
     }
     edges.forEach((e) => {
-      stats.get(e.from).out++;
-      stats.get(e.to).in++;
+      stats.get(e.from)!.out++;
+      stats.get(e.to)!.in++;
     });
     return { edges: [...edges.values()], stats };
   }
-  function descendants(id) {
+  function descendants(id: string) {
     const out = [id];
     for (let i = 0; i < out.length; i++) out.push(...(tree.groups.get(out[i])?.children || []));
     return out;
   }
   // Layered layout: consumers on the left, the code they rely on to the right. Cycles are cut by DFS order.
-  function layout(items, edges) {
-    const out = new Map(items.map((c) => [c.key, []]));
-    edges.filter((e) => e.count).forEach((e) => out.get(e.from).push(e.to));
-    const state = new Map(),
-      back = new Set();
-    const dfs = (v) => {
+  function layout(items: Item[], edges: MapEdge[]) {
+    const out = new Map<string, string[]>(items.map((c) => [c.key, []]));
+    edges.filter((e) => e.count).forEach((e) => out.get(e.from)!.push(e.to));
+    const state = new Map<string, number>(),
+      back = new Set<string>();
+    const dfs = (v: string) => {
       state.set(v, 1);
-      for (const w of out.get(v)) {
+      for (const w of out.get(v)!) {
         if (state.get(w) === 1) back.add(`${v}\n${w}`);
         else if (!state.get(w)) dfs(w);
       }
       state.set(v, 2);
     };
     items.forEach((c) => !state.get(c.key) && dfs(c.key));
-    const rank = new Map();
-    const depth = (v) => {
-      if (rank.has(v)) return rank.get(v);
+    const rank = new Map<string, number>();
+    const depth = (v: string): number => {
+      if (rank.has(v)) return rank.get(v)!;
       rank.set(v, 0);
       let r = 0;
-      for (const w of out.get(v)) if (!back.has(`${v}\n${w}`)) r = Math.max(r, depth(w) + 1);
+      for (const w of out.get(v)!) if (!back.has(`${v}\n${w}`)) r = Math.max(r, depth(w) + 1);
       rank.set(v, r);
       return r;
     };
     items.forEach((c) => depth(c.key));
     const max = Math.max(0, ...rank.values());
-    const columns = [];
-    items.forEach((c) => (columns[max - rank.get(c.key)] ||= []).push(c));
+    const columns: Item[][] = [];
+    items.forEach((c) => (columns[max - rank.get(c.key)!] ||= []).push(c));
     const order = { group: 0, folder: 1, file: 2 };
-    const coords = new Map();
+    const coords = new Map<string, Point>();
     // A tall, narrow pane stacks the layers top to bottom so cards stay readable.
     const box = $("viewport");
     const vertical = box.clientHeight > box.clientWidth * 1.1;
@@ -509,14 +585,14 @@
     if (vertical) {
       // Centre short rows under the widest one.
       const width = Math.max(...points.map((p) => p.x + NODE_W));
-      const rows = new Map();
+      const rows = new Map<number, string[]>();
       coords.forEach((p, k) => {
         if (!rows.has(p.y)) rows.set(p.y, []);
-        rows.get(p.y).push(k);
+        rows.get(p.y)!.push(k);
       });
       rows.forEach((keys) => {
-        const right = Math.max(...keys.map((k) => coords.get(k).x + NODE_W));
-        keys.forEach((k) => (coords.get(k).x += (width - right) / 2));
+        const right = Math.max(...keys.map((k) => coords.get(k)!.x + NODE_W));
+        keys.forEach((k) => (coords.get(k)!.x += (width - right) / 2));
       });
     }
     return {
@@ -527,7 +603,7 @@
       height: Math.max(NODE_H, ...points.map((p) => p.y + NODE_H)),
     };
   }
-  function structuralRole(item, stat) {
+  function structuralRole(item: Item, stat: Stat): string | null {
     if (item.files.every(isTest)) return "roleTests";
     if (item.kind === "file") return null;
     if (stat.in === 0 && stat.out > 0) return "roleEntry";
@@ -555,24 +631,27 @@
     };
     transform();
   }
-  function go(nextStack, select) {
+  function go(nextStack: Level[], select?: string | null) {
     stack = nextStack;
     selected = new Set(select ? [select] : []);
     pendingReveal = null;
     render();
     fit();
   }
-  const enter = (open) => go([...stack, open]);
-  let pendingReveal = null;
+  const enter = (open: Level) => go([...stack, open]);
+  let pendingReveal: string | null = null;
   /** Opens the level that shows `path` (a file or folder) and selects the card holding it. */
-  function reveal(path) {
+  function reveal(path: string) {
     const file = tree.byPath.has(path) ? path : (tree.folders.get(path) || [])[0];
     if (!file) return;
-    const next = [{ key: "root" }];
+    const next: Level[] = [{ key: "root" }];
     if (tree.semantic) {
       const owner = tree.groupOf.get(file);
-      const chain = [];
-      for (let g = owner; g; g = tree.groups.get(g)?.parent) chain.unshift(tree.groups.get(g));
+      const chain: Group[] = [];
+      for (let g: string | null | undefined = owner; g; g = tree.groups.get(g)?.parent) {
+        const group = tree.groups.get(g);
+        if (group) chain.unshift(group);
+      }
       chain.slice(0, -1).forEach((g) => next.push({ key: `g:${g.id}`, label: groupName(g) }));
       const leaf = chain[chain.length - 1];
       if (leaf.children.length) next.push({ key: `g:${leaf.id}`, label: groupName(leaf) });
@@ -601,13 +680,13 @@
     render();
     fit();
   }
-  async function showSource(path, line = 1) {
+  async function showSource(path: string, line = 1) {
     const sourceId = ++sourceEpoch,
       currentProject = projectPath;
-    const text = await call("readSource", { projectPath, path });
+    const text = await call<string>("readSource", { projectPath, path });
     if (sourceId !== sourceEpoch || currentProject !== projectPath) return;
-    $("source").querySelector("strong").textContent = `${path}:${line}`;
-    const pre = $("source").querySelector("pre");
+    $("source").querySelector("strong")!.textContent = `${path}:${line}`;
+    const pre = $("source").querySelector("pre")!;
     pre.replaceChildren();
     text.split("\n").forEach((value, i) => {
       pre.append(
@@ -618,20 +697,20 @@
     if (!$("source").open) $("source").showModal();
     pre.querySelector(".target")?.scrollIntoView({ block: "center" });
   }
-  function fileButton(path, line) {
+  function fileButton(path: string, line?: number) {
     const b = el("button", line ? `${path}:${line}` : path, "file");
-    b.title = b.textContent;
+    b.title = b.textContent ?? "";
     b.onclick = () => void showSource(path, line).catch(() => {});
     return b;
   }
-  function jumpButton(label, count, target, className = "") {
+  function jumpButton(label: string, count: number, target: string, className = "") {
     const row = el("button", undefined, `jump ${className}`);
     row.append(el("span", label), el("small", count ? String(count) : ""));
     row.title = target;
     row.onclick = () => reveal(target);
     return row;
   }
-  function section(title, items) {
+  function section(title: string, items: HTMLElement[]) {
     if (!items.length) return;
     if (title) $("details").append(el("h3", title));
     const list = el("div", undefined, "list");
@@ -639,10 +718,10 @@
     $("details").append(list);
   }
   /** Groups linked files by meaning (the agent's group) or, without groups, by folder. */
-  function grouped(files) {
-    const counts = new Map();
+  function grouped(files: string[]) {
+    const counts = new Map<string, { label: string; count: number; target: string; group: boolean }>();
     for (const f of files) {
-      const g = tree.semantic ? tree.groups.get(tree.groupOf.get(f)) : null;
+      const g = tree.semantic ? tree.groups.get(tree.groupOf.get(f) ?? "") : null;
       const key = g ? `g:${g.id}` : parentOf(f) || f;
       const entry = counts.get(key) || { label: g ? groupName(g) : parentOf(f) || f, count: 0, target: f, group: !!g };
       entry.count++;
@@ -650,8 +729,8 @@
     }
     return [...counts.values()].sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
   }
-  const roleLabel = (role) => (role ? t(`role.${role}`) : "");
-  function details(items, analysis) {
+  const roleLabel = (role: string | null) => (role ? t(`role.${role}`) : "");
+  function details(graph: Graph, items: Item[], analysis: ReturnType<typeof analyze>) {
     const panel = $("details");
     panel.replaceChildren();
     const query = $("search").value.trim().toLowerCase();
@@ -678,7 +757,7 @@
       section(
         groupHits.length && hits.length ? t("files") : "",
         hits.map((p) =>
-          jumpButton(p, tree.folders.has(p) ? tree.folders.get(p).length : 0, p, tree.folders.has(p) ? "is-dir" : ""),
+          jumpButton(p, tree.folders.get(p)?.length ?? 0, p, tree.folders.has(p) ? "is-dir" : ""),
         ),
       );
       return;
@@ -687,7 +766,7 @@
     if (!item) {
       const current = stack[stack.length - 1];
       const levelGroup = current.key.startsWith("g:") ? tree.groups.get(current.key.slice(2)) : null;
-      panel.append(el("h2", current.key === "root" ? projectName() : current.label));
+      panel.append(el("h2", current.key === "root" ? projectName() : (current.label ?? "")));
       if (current.key === "root" && tree.semantic?.summary) panel.append(el("p", tree.semantic.summary, "summary"));
       else if (levelGroup?.description) panel.append(el("p", levelGroup.description, "summary"));
       panel.append(el("p", t(tree.semantic && !current.key.startsWith("d:") ? "hintGroups" : "hint"), "muted"));
@@ -698,7 +777,7 @@
         t("mostUsed"),
         top.slice(0, 6).map(([k, s]) => {
           const b = el("button", undefined, "jump plain");
-          b.append(el("span", items.find((c) => c.key === k).label), el("small", String(s.in)));
+          b.append(el("span", items.find((c) => c.key === k)?.label ?? k), el("small", String(s.in)));
           b.onclick = () => {
             selected = new Set([k]);
             render();
@@ -708,7 +787,7 @@
       );
       return;
     }
-    const stat = analysis.stats.get(item.key);
+    const stat = analysis.stats.get(item.key)!;
     const head = el("div", undefined, "detail-head");
     head.append(el("h2", item.label));
     if (item.group?.role) head.append(el("span", roleLabel(item.group.role), "tag role"));
@@ -720,7 +799,8 @@
     const actions = el("div", undefined, "actions");
     if (item.open) {
       const b = el("button", t(item.kind === "group" ? "openGroup" : "openFolder"), "primary");
-      b.onclick = () => enter(item.open);
+      const open = item.open;
+      b.onclick = () => enter(open);
       actions.append(b);
     }
     if (item.kind === "file" || (item.kind === "group" && item.files.length === 1)) {
@@ -739,11 +819,11 @@
       panel.append(block);
     }
     const inside = new Set(item.files);
-    const outgoing = [],
-      incoming = [];
+    const outgoing: string[] = [],
+      incoming: string[] = [];
     item.files.forEach((f) => {
-      (tree.byPath.get(f)?.deps || []).forEach((d) => !inside.has(d) && outgoing.push(d));
-      (tree.importers.get(f) || []).forEach((s) => !inside.has(s) && incoming.push(s));
+      for (const d of tree.byPath.get(f)?.deps || []) if (!inside.has(d)) outgoing.push(d);
+      for (const s of tree.importers.get(f) || []) if (!inside.has(s)) incoming.push(s);
     });
     section(
       t("dependsOn"),
@@ -755,7 +835,8 @@
     );
     if (item.group && tree.semantic) {
       const ids = new Set(descendants(item.group.id));
-      const notes = (tree.semantic.relations || [])
+      const semantic = tree.semantic;
+      const notes = (semantic.relations || [])
         .filter((r) => ids.has(r.from) !== ids.has(r.to))
         .map((r) => {
           const other = tree.groups.get(ids.has(r.from) ? r.to : r.from);
@@ -781,9 +862,10 @@
     bar.replaceChildren();
     stack.forEach((entry, i) => {
       if (i) bar.append(el("span", "/", "sep"));
-      const b = el("button", i ? entry.label : projectName(), "crumb" + (i === stack.length - 1 ? " current" : ""));
-      b.onclick = () =>
-        i < stack.length - 1 && go(stack.slice(0, i + 1), stack[i + 1]?.key.startsWith("g:") ? stack[i + 1].key : null);
+      const b = el("button", i ? (entry.label ?? "") : projectName(), "crumb" + (i === stack.length - 1 ? " current" : ""));
+      b.onclick = () => {
+        if (i < stack.length - 1) go(stack.slice(0, i + 1), stack[i + 1]?.key.startsWith("g:") ? stack[i + 1].key : null);
+      };
       bar.append(b);
     });
   }
@@ -794,12 +876,12 @@
       '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.75 3.5h4l1.5 1.5h7v7.75a.75.75 0 0 1-.75.75h-11a.75.75 0 0 1-.75-.75z"/></svg>',
     file: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.75 1.75h5.5l3 3v9.5h-8.5z"/><path d="M9.25 1.75v3h3"/></svg>',
   };
-  function languageLabel(path) {
+  function languageLabel(path: string) {
     const ext = /\.([a-z0-9]+)$/i.exec(path)?.[1]?.toLowerCase();
     return ext ? ext.toUpperCase() : t("file");
   }
   function statusText() {
-    if (busyJob()) {
+    if (job && busyJob()) {
       if (job.status === "listing") return t("listing");
       if (job.status === "indexing") return `${t("indexing")} · ${job.done}/${job.total}`;
       return agentLine ? `${t("understanding")} · ${agentLine}` : t("understanding");
@@ -809,7 +891,7 @@
     if (impact && graph && impact.version !== graph.version) return t("oldImpact");
     if (!sessionId) return t("noChat");
     if (!toolsAvailable) return t("noTools");
-    if (validImpact()) return `${t("forecast")}: ${impact.task.slice(0, 160)}`;
+    if (impact && validImpact()) return `${t("forecast")}: ${impact.task.slice(0, 160)}`;
     return t("ready");
   }
   function render() {
@@ -822,8 +904,8 @@
     $("search").placeholder = t("search");
     $("search").setAttribute("aria-label", t("search"));
     $("projects").setAttribute("aria-label", t("project"));
-    $("empty").querySelector("h2").textContent = t("empty");
-    $("empty").querySelector("p").textContent = t("emptyText");
+    $("empty").querySelector("h2")!.textContent = t("empty");
+    $("empty").querySelector("p")!.textContent = t("emptyText");
     $("empty").hidden = !!graph;
     $("build").disabled = !projectPath;
     const busy = busyJob();
@@ -834,7 +916,7 @@
     $("cancel").hidden = !busy;
     $("status").textContent = statusText();
     $("status").classList.toggle("working", !!busy);
-    $("status").title = validImpact() ? impact.task : "";
+    $("status").title = impact && validImpact() ? impact.task : "";
     $("warning").hidden = !warning || !!busy;
     $("warning").textContent = warning ? `${t("agentFailed")} ${warning}` : "";
     $("stats").textContent = graph ? quantity(graph.files.length, "files") : "";
@@ -848,9 +930,9 @@
       el("span", t("flow"), "flow"),
       ...(graph?.semantic?.groups?.length ? [el("span", t("modelLink"), "flow")] : []),
     );
-    $("limitations").querySelector("summary").textContent = t("limitations");
+    $("limitations").querySelector("summary")!.textContent = t("limitations");
     $("limitations")
-      .querySelector("ul")
+      .querySelector("ul")!
       .replaceChildren(...(graph?.limitations || []).map((s) => el("li", limitation(s))));
     const nodes = $("nodes"),
       svg = $("edges");
@@ -863,9 +945,9 @@
       $("details").replaceChildren();
       return;
     }
-    if (!tree || tree.version !== graph.version) {
-      const wasSemantic = !!tree?.semantic;
-      buildTree();
+    if (treeVersion !== graph.version) {
+      const wasSemantic = treeVersion !== null && !!tree.semantic;
+      buildTree(graph);
       // The groups changed under the open level (the agent finished): start from the top.
       if (wasSemantic !== !!tree.semantic) stack = [{ key: "root" }];
     }
@@ -876,19 +958,20 @@
     }
     // Opening the root of a single-folder project goes straight in.
     if (stack.length === 1 && items.length === 1 && items[0].open && !tree.semantic) {
-      stack.push(items[0].open);
+      stack.push(items[0].open!);
       items = levelItems(levelKey());
     }
     crumbs();
     $("up").disabled = stack.length < 2;
     if (pendingReveal) {
-      const hit = items.find((c) => c.files.includes(pendingReveal));
+      const target = pendingReveal;
+      const hit = items.find((c) => c.files.includes(target));
       if (hit) selected = new Set([hit.key]);
       pendingReveal = null;
     }
     selected = new Set([...selected].filter((k) => items.some((c) => c.key === k)));
     $("insert").disabled = !sessionId || !selected.size || !modulesFor(filesOf(selected, items)).length;
-    const analysis = analyze(items);
+    const analysis = analyze(graph, items);
     const placed = layout(items, analysis.edges);
     view = { width: placed.width, height: placed.height };
     const query = $("search").value.trim().toLowerCase();
@@ -900,8 +983,8 @@
         if (focus.has(e.to)) linked.add(e.from);
       });
     for (const item of items) {
-      const { x, y } = placed.coords.get(item.key);
-      const stat = analysis.stats.get(item.key);
+      const { x, y } = placed.coords.get(item.key)!;
+      const stat = analysis.stats.get(item.key)!;
       const forecast = forecastFor(item.files);
       const match =
         query && (item.label.toLowerCase().includes(query) || item.files.some((f) => f.toLowerCase().includes(query)));
@@ -924,7 +1007,7 @@
       b.append(title);
       if (item.group?.description) b.append(el("span", item.group.description, "node-desc"));
       const meta = el("span", undefined, "node-meta");
-      meta.append(el("span", item.kind === "file" ? languageLabel(item.path) : quantity(item.files.length, "files")));
+      meta.append(el("span", item.kind === "file" ? languageLabel(item.path ?? item.label) : quantity(item.files.length, "files")));
       if (stat.in) meta.append(el("span", `← ${stat.in}`, "count in"));
       if (stat.out) meta.append(el("span", `→ ${stat.out}`, "count out"));
       const role = item.group ? (item.group.role ? `role.${item.group.role}` : null) : structuralRole(item, stat);
@@ -939,7 +1022,7 @@
         render();
       };
       b.ondblclick = () =>
-        item.open ? enter(item.open) : item.kind === "file" && void showSource(item.path).catch(() => {});
+        item.open ? enter(item.open) : item.kind === "file" && void showSource(item.path ?? item.files[0]).catch(() => {});
       b.onkeydown = (e) => {
         if (e.key === "Enter" && item.open && selected.has(item.key)) {
           e.preventDefault();
@@ -971,12 +1054,12 @@
     svg.append(defs);
     const maxCount = Math.max(1, ...analysis.edges.map((e) => e.count));
     for (const e of analysis.edges) {
-      const a = placed.coords.get(e.from),
-        b = placed.coords.get(e.to);
+      const a = placed.coords.get(e.from)!,
+        b = placed.coords.get(e.to)!;
       const active = focus && (focus.has(e.from) || focus.has(e.to));
       const backward = placed.vertical ? b.y <= a.y : placed.back.has(`${e.from}\n${e.to}`) || b.x <= a.x;
       const p = document.createElementNS(ns, "path");
-      let d;
+      let d: string;
       if (placed.vertical) {
         const sx = a.x + NODE_W / 2 + (backward ? 14 : 0),
           tx = b.x + NODE_W / 2 + (backward ? 14 : 0);
@@ -1030,7 +1113,7 @@
         `${backward ? "back " : ""}${onlyModel ? "model " : ""}${active ? "active" : focus ? "dim" : ""}`,
       );
       const tip = document.createElementNS(ns, "title");
-      const label = (k) => items.find((c) => c.key === k)?.label || k;
+      const label = (k: string) => items.find((c) => c.key === k)?.label || k;
       tip.textContent = [
         `${label(e.from)} → ${label(e.to)}${e.count ? `: ${quantity(e.count, "imports")}` : ""}`,
         ...(e.reasons || []),
@@ -1042,14 +1125,17 @@
     $("board").style.width = `${view.width}px`;
     $("board").style.height = `${view.height}px`;
     transform();
-    details(items, analysis);
+    details(graph, items, analysis);
   }
   async function reload() {
     if (!projectPath) return;
     const request = ++reloadSequence;
     const revision = epoch,
       current = projectPath;
-    const value = await call("state", { projectPath: current, sessionId });
+    const value = await call<{ graph: Graph | null; impact: Impact | null; stale: boolean; job: JobState | null }>("state", {
+      projectPath: current,
+      sessionId,
+    });
     if (revision !== epoch || current !== projectPath || request !== reloadSequence) return;
     graph = value.graph;
     impact = value.impact;
@@ -1057,7 +1143,7 @@
     job = value.job;
     render();
   }
-  async function bindSession(next) {
+  async function bindSession(next: string | null) {
     epoch++;
     sourceEpoch++;
     sessionId = next;
@@ -1065,7 +1151,7 @@
     impact = null;
     selected.clear();
     stack = [{ key: "root" }];
-    tree = null;
+    treeVersion = null;
     warning = "";
     job = null;
     stale = false;
@@ -1074,7 +1160,7 @@
     if ($("source").open) $("source").close();
     const revision = epoch;
     if (sessionId) {
-      const current = await call("session", { sessionId });
+      const current = await call<{ projectPath: string; toolsAvailable: boolean }>("session", { sessionId });
       if (revision !== epoch) return;
       projectPath = current.projectPath;
       toolsAvailable = current.toolsAvailable;
@@ -1093,7 +1179,7 @@
     $("error").hidden = true;
     warning = "";
     agentLine = "";
-    job = await call("startIndex", { projectPath, rethink });
+    job = await call<JobState>("startIndex", { projectPath, rethink });
     render();
   }
   $("refresh").onclick = $("build").onclick = () => void start().catch(() => {});
@@ -1109,7 +1195,7 @@
   /** The full-screen workspace picks up the project and level the pane handed over. */
   async function takeFocus() {
     if (inPane) return;
-    const focus = await call("takeFocus");
+    const focus = await call<{ projectPath?: string; stack?: Level[]; selected?: string[] } | null>("takeFocus");
     if (!focus?.projectPath) return;
     if ($("projects").value !== focus.projectPath) {
       $("projects").value = focus.projectPath;
@@ -1119,7 +1205,7 @@
       impact = null;
       job = null;
       stale = false;
-      tree = null;
+      treeVersion = null;
       await reload();
     }
     stack = Array.isArray(focus.stack) && focus.stack.length ? focus.stack : [{ key: "root" }];
@@ -1127,7 +1213,9 @@
     render();
     fit();
   }
-  $("cancel").onclick = () => job && void call("cancelIndex", { id: job.id }).catch(() => {});
+  $("cancel").onclick = () => {
+    if (job) void call("cancelIndex", { id: job.id }).catch(() => {});
+  };
   $("search").oninput = () => render();
   $("up").onclick = () => {
     if (stack.length < 2) return;
@@ -1135,7 +1223,7 @@
     go(stack.slice(0, -1), leaving.startsWith("g:") ? leaving : null);
   };
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Backspace" && !$("up").disabled && !e.target.closest("input,select,textarea,dialog")) {
+    if (e.key === "Backspace" && !$("up").disabled && !(e.target as HTMLElement).closest("input,select,textarea,dialog")) {
       e.preventDefault();
       $("up").click();
     }
@@ -1159,7 +1247,7 @@
     epoch++;
     selected.clear();
     stack = [{ key: "root" }];
-    tree = null;
+    treeVersion = null;
     warning = "";
     graph = null;
     impact = null;
@@ -1174,9 +1262,9 @@
     $("source").close();
     sourceEpoch++;
   };
-  let drag = null;
+  let drag: { x: number; y: number; startX: number; startY: number } | null = null;
   $("viewport").onpointerdown = (e) => {
-    if (e.target.closest("button")) return;
+    if ((e.target as HTMLElement).closest("button")) return;
     drag = { x: e.clientX - pan.x, y: e.clientY - pan.y, startX: e.clientX, startY: e.clientY };
     $("viewport").setPointerCapture(e.pointerId);
   };
@@ -1211,8 +1299,10 @@
     },
     { passive: false },
   );
-  bridge.subscribe((event, data) => {
-    if (event === "theme") document.documentElement.dataset.theme = data;
+  bridge.subscribe((event, raw) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const data = raw as any;
+    if (event === "theme") document.documentElement.dataset.theme = String(data);
     if (event === "language") {
       language = data === "ru" ? "ru" : "en";
       render();
@@ -1243,7 +1333,7 @@
       void reload().catch(() => {});
   });
   document.documentElement.dataset.theme = info.theme;
-  const projects = await call("projects");
+  const projects = await call<{ path: string; name: string }[]>("projects");
   projects.forEach((p) => {
     const o = el("option", p.name);
     o.value = p.path;
@@ -1253,7 +1343,7 @@
   await takeFocus().catch(() => {});
   window.addEventListener("focus", () => void reload().catch(() => {}));
   // The pane is resized with the chat: re-place the cards (orientation may flip) and fit again.
-  let resizeTimer = 0;
+  let resizeTimer: ReturnType<typeof setTimeout> | undefined;
   window.addEventListener("resize", () => {
     clearTimeout(resizeTimer);
     resizeTimer = setTimeout(() => {
@@ -1265,6 +1355,8 @@
     if (!document.hidden && !busyJob()) void reload().catch(() => {});
   }, 30000);
 })().catch((e) => {
-  document.getElementById("error").hidden = false;
-  document.getElementById("error").textContent = String(e);
+  const box = document.getElementById("error");
+  if (!box) return;
+  box.hidden = false;
+  box.textContent = String(e);
 });

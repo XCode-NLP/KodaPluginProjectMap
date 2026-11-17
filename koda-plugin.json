@@ -12,11 +12,18 @@
   },
   "icon": "icon.svg",
   "main": "bundle/main.js",
-  "ui": "ui/index.html",
+  "ui": "bundle/ui/index.html",
   "engines": {
+    "koda": ">=1.4.0",
     "sdk": "1"
   },
-  "permissions": ["project.read", "agent.run", "agent.tools", "chat.composer", "chat.context"],
+  "permissions": [
+    "project.read",
+    "agent.run",
+    "agent.tools",
+    "chat.composer",
+    "chat.context"
+  ],
   "contributes": {
     "workspaces": [
       {
@@ -48,7 +55,8 @@
         "inputSchema": {
           "type": "object",
           "properties": {},
-          "required": []
+          "required": [],
+          "additionalProperties": false
         },
         "readOnly": true
       },
@@ -66,7 +74,10 @@
               "minimum": 0
             }
           },
-          "required": ["moduleId"]
+          "required": [
+            "moduleId"
+          ],
+          "additionalProperties": false
         },
         "readOnly": true
       },
@@ -102,7 +113,13 @@
                     }
                   }
                 },
-                "required": ["id", "name", "description", "files"]
+                "required": [
+                  "id",
+                  "name",
+                  "description",
+                  "files"
+                ],
+                "additionalProperties": false
               }
             },
             "edges": {
@@ -120,11 +137,20 @@
                     "type": "string"
                   }
                 },
-                "required": ["from", "to", "reason"]
+                "required": [
+                  "from",
+                  "to",
+                  "reason"
+                ],
+                "additionalProperties": false
               }
             }
           },
-          "required": ["version", "modules"]
+          "required": [
+            "version",
+            "modules"
+          ],
+          "additionalProperties": false
         },
         "readOnly": false
       },
@@ -150,7 +176,12 @@
                     "type": "string"
                   },
                   "category": {
-                    "enum": ["direct", "indirect", "check"]
+                    "enum": [
+                      "direct",
+                      "indirect",
+                      "check"
+                    ],
+                    "type": "string"
                   },
                   "reason": {
                     "type": "string"
@@ -173,15 +204,31 @@
                           "description": "Code reference or import supporting the forecast"
                         }
                       },
-                      "required": ["path", "line", "spec"]
+                      "required": [
+                        "path",
+                        "line",
+                        "spec"
+                      ],
+                      "additionalProperties": false
                     }
                   }
                 },
-                "required": ["moduleId", "category", "reason", "evidence"]
+                "required": [
+                  "moduleId",
+                  "category",
+                  "reason",
+                  "evidence"
+                ],
+                "additionalProperties": false
               }
             }
           },
-          "required": ["version", "task", "items"]
+          "required": [
+            "version",
+            "task",
+            "items"
+          ],
+          "additionalProperties": false
         },
         "readOnly": false
       }
